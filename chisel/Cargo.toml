@@ -18,8 +18,10 @@ libchisel = { path = "../libchisel", version = "0.5.0" }
 serde = "1.0.80"
 serde_derive = "1.0.80"
 serde_yaml = "0.8.7"
+# For outputting wat
+wabt = { version = "0.8.0", optional = true }
 
 [features]
-default = []
-wabt = [ "libchisel/wabt" ]
+default = ["wabt-utils"]
+wabt-utils = ["wabt", "libchisel/wabt"]
 binaryen = ["libchisel/binaryen"]

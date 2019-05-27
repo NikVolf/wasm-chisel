@@ -11,10 +11,28 @@ use std::fmt::{self, Display};
 use std::fs::{canonicalize, read};
 use std::path::PathBuf;
 
-use libchisel::Module;
-
 use crate::config::ChiselConfig;
 use crate::result::{ChiselResult, ModuleResult, RulesetResult};
+
+use libchisel::{
+    checkfloat::CheckFloat,
+    checkstartfunc::CheckStartFunc,
+    //deployer::Deployer,
+    dropsection::DropSection,
+    //fromwat
+    remapimports::RemapImports,
+    remapstart::RemapStart,
+    repack::Repack,
+    snip::Snip,
+    trimexports::TrimExports,
+    trimstartfunc::TrimStartFunc,
+    verifyexports::VerifyExports,
+    verifyimports::VerifyImports,
+    Module,
+    ModulePreset,
+    ModuleTranslator,
+    ModuleValidator,
+};
 
 /// State machine implementing the main chisel execution loop. Consumes ChiselConfig and returns
 /// ChiselResult, with an intermediate state returned to allow error handling.
@@ -163,7 +181,315 @@ impl ChiselDriver {
 
                 // TODO: homogeneous module handling
                 let module_result = match name.as_str() {
-                    _ => unimplemented!(),
+                    "checkfloat" => {
+                        let checkfloat = CheckFloat::new();
+                        let module_result = checkfloat.validate(&wasm);
+                        ModuleResult::Validator(name.clone(), module_result)
+                    }
+                    "checkstartfunc" => {
+                        if let Some(require_start) = module.options().get("require_start") {
+                            let require_start = match require_start.as_str() {
+                                "true" => true,
+                                "false" => false,
+                                _ => {
+                                    self.state = DriverState::Error(
+                                        DriverError::InvalidField(
+                                            name.clone(),
+                                            "require_start".to_string(),
+                                        ),
+                                        results,
+                                    );
+                                    return &self.state;
+                                }
+                            };
+                            let checkstartfunc = CheckStartFunc::new(require_start);
+                            let module_result = checkstartfunc.validate(&wasm);
+                            ModuleResult::Validator(name.clone(), module_result)
+                        } else {
+                            chisel_debug!(1, "checkstartfunc missing field 'require_start'");
+                            self.state = DriverState::Error(
+                                DriverError::MissingRequiredField(
+                                    name.clone(),
+                                    "require_start".to_string(),
+                                ),
+                                results,
+                            );
+                            return &self.state;
+                        }
+                    }
+                    "deployer" => unimplemented!("Creator modules are not supported yet."),
+                    "dropsection" => {
+                        match (module.options().get("mode"), module.options().get("key")) {
+                            (Some(mode), Some(key)) => {
+                                let dropsections = match mode.as_str() {
+                                    "names" => {
+                                        // Ignore key here.
+                                        vec![DropSection::NamesSection]
+                                    }
+                                    // TODO: Split into a batch
+                                    "custom_by_name" => key
+                                        .split(',')
+                                        .filter(|val| *val != "" && *val != " ")
+                                        .map(|val| {
+                                            chisel_debug!(
+                                                1,
+                                                "Loading dropsection for name: '{}'",
+                                                val
+                                            );
+                                            DropSection::CustomSectionByName(val.to_string())
+                                        })
+                                        .collect(),
+                                    m @ "custom_by_index" | m @ "unknown_by_index" => {
+                                        chisel_debug!(1, "Running dropsection in mode {}", m);
+                                        // TODO: Split into a helper
+                                        // First generate a set of section indices to drop from the
+                                        // comma-separated list we produced during config parsing.
+                                        let (indices, mut errs): (Vec<Result<u64, Box<dyn Error>>>, Vec<Result<u64, Box<dyn Error>>>) = key.split(',')
+                                            .filter(|val| *val != "" && *val != " ")
+                                            .map(|val|
+                                                match str::parse::<u64>(val) {
+                                                    Ok(index) => {
+                                                        chisel_debug!(1, "Loading dropsection for index: {}", index);
+                                                        Ok(index)
+                                                    },
+                                                    Err(e) => {
+                                                        chisel_debug!(1, "dropsection failed to parse integer value: {}", e);
+                                                        Err(e.into())
+                                                    },
+                                                },
+                                            )
+                                            .partition(|i| i.is_ok());
+                                        // If the right-hand partition contains any errors,
+                                        // propagate the last one.
+                                        if let Some(e) = errs.pop() {
+                                            // For now, just use the last error as we only have
+                                            // one error case.
+                                            self.state = DriverState::Error(
+                                                DriverError::Internal(
+                                                    name.clone(),
+                                                    "Expected integer value".to_string(),
+                                                    e.unwrap_err(),
+                                                ),
+                                                results,
+                                            );
+                                            return &self.state;
+                                        }
+                                        // Collect the indices into a vec of initialized
+                                        // DropSection modules.
+                                        indices
+                                            .into_iter()
+                                            .map(|idx| match m {
+                                                "custom_by_index" => {
+                                                    DropSection::CustomSectionByIndex(
+                                                        idx.expect("Already handled errors")
+                                                            as usize,
+                                                    )
+                                                }
+                                                "unknown_by_index" => {
+                                                    DropSection::UnknownSectionByIndex(
+                                                        idx.expect("Already handled errors")
+                                                            as usize,
+                                                    )
+                                                }
+                                                _ => panic!(
+                                                    "Parent match ensures this cannot be reached"
+                                                ),
+                                            })
+                                            .collect()
+                                    }
+                                    _ => {
+                                        chisel_debug!(1, "dropsection given invalid mode");
+                                        self.state = DriverState::Error(
+                                            DriverError::InvalidField(
+                                                name.clone(),
+                                                "mode".to_string(),
+                                            ),
+                                            results,
+                                        );
+                                        return &self.state;
+                                    }
+                                };
+                                let module_result = dropsections
+                                    .iter()
+                                    .map(|i| i.translate_inplace(&mut wasm))
+                                    .fold(Ok(false), |acc, result| match result {
+                                        Ok(true) => result,
+                                        Ok(false) => acc,
+                                        Err(e) => Err(e),
+                                    });
+                                ModuleResult::Translator(name.clone(), module_result)
+                            }
+                            (Some(mode), None) => {
+                                if mode.as_str() == "names" {
+                                    let dropsection = DropSection::NamesSection;
+                                    let module_result = dropsection.translate_inplace(&mut wasm);
+                                    ModuleResult::Translator(name.clone(), module_result)
+                                } else {
+                                    chisel_debug!(1, "dropsection missing field 'key' and not in names section mode");
+                                    self.state = DriverState::Error(
+                                        DriverError::MissingRequiredField(
+                                            name.clone(),
+                                            "key".to_string(),
+                                        ),
+                                        results,
+                                    );
+                                    return &self.state;
+                                }
+                            }
+                            (None, _) => {
+                                chisel_debug!(1, "dropsection missing field 'mode'");
+                                self.state = DriverState::Error(
+                                    DriverError::MissingRequiredField(
+                                        name.clone(),
+                                        "mode".to_string(),
+                                    ),
+                                    results,
+                                );
+                                return &self.state;
+                            }
+                        }
+                    }
+                    "fromwat" => unimplemented!("Creator modules are not supported yet."),
+                    "remapimports" => {
+                        if let Some(preset) = module.options().get("preset") {
+                            let remapimports = RemapImports::with_preset(preset.as_str());
+                            if let Ok(remapimports) = remapimports {
+                                // TODO: try other translate method as well as well
+                                let module_result = remapimports.translate_inplace(&mut wasm);
+                                ModuleResult::Translator(name.clone(), module_result)
+                            } else {
+                                chisel_debug!(1, "remapimports given invalid preset");
+                                self.state = DriverState::Error(
+                                    DriverError::InvalidField(name.clone(), "preset".to_string()),
+                                    results,
+                                );
+                                return &self.state;
+                            }
+                        } else {
+                            chisel_debug!(1, "remapimports missing field 'preset'");
+                            self.state = DriverState::Error(
+                                DriverError::MissingRequiredField(
+                                    name.clone(),
+                                    "preset".to_string(),
+                                ),
+                                results,
+                            );
+                            return &self.state;
+                        }
+                    }
+                    "remapstart" => {
+                        // NOTE: preset "ewasm" maps to the default and only mode. Fixing
+                        // later.
+                        let remapstart = RemapStart::with_preset("ewasm").expect("Should not fail");
+                        let module_result = remapstart.translate_inplace(&mut wasm);
+                        ModuleResult::Translator(name.clone(), module_result)
+                    }
+                    "repack" => {
+                        let repack = Repack::new();
+                        let module_result = repack.translate_inplace(&mut wasm);
+                        ModuleResult::Translator(name.clone(), module_result)
+                    }
+                    "snip" => {
+                        let snip = Snip::new();
+                        let module_result = snip.translate_inplace(&mut wasm);
+                        ModuleResult::Translator(name.clone(), module_result)
+                    }
+                    "trimexports" => {
+                        if let Some(preset) = module.options().get("preset") {
+                            let trimexports = TrimExports::with_preset(preset.as_str());
+                            if let Ok(trimexports) = trimexports {
+                                // TODO: try other translate method as well as well
+                                let module_result = trimexports.translate_inplace(&mut wasm);
+                                ModuleResult::Translator(name.clone(), module_result)
+                            } else {
+                                chisel_debug!(1, "trimexports given invalid preset");
+                                self.state = DriverState::Error(
+                                    DriverError::InvalidField(name.clone(), "preset".to_string()),
+                                    results,
+                                );
+                                return &self.state;
+                            }
+                        } else {
+                            chisel_debug!(1, "remapimports missing field 'preset'");
+                            self.state = DriverState::Error(
+                                DriverError::MissingRequiredField(
+                                    name.clone(),
+                                    "preset".to_string(),
+                                ),
+                                results,
+                            );
+                            return &self.state;
+                        }
+                    }
+                    "trimstartfunc" => {
+                        // NOTE: preset "ewasm" maps to the default and only mode. Fixing
+                        // later.
+                        let trimstartfunc =
+                            TrimStartFunc::with_preset("ewasm").expect("Should not fail");
+                        let module_result = trimstartfunc.translate_inplace(&mut wasm);
+                        ModuleResult::Translator(name.clone(), module_result)
+                    }
+                    "verifyexports" => {
+                        if let Some(preset) = module.options().get("preset") {
+                            let verifyexports = VerifyExports::with_preset(preset.as_str());
+                            if let Ok(verifyexports) = verifyexports {
+                                // TODO: try other translate method as well as well
+                                let module_result = verifyexports.validate(&wasm);
+                                ModuleResult::Validator(name.clone(), module_result)
+                            } else {
+                                chisel_debug!(1, "verifyexports given invalid preset");
+                                self.state = DriverState::Error(
+                                    DriverError::InvalidField(name.clone(), "preset".to_string()),
+                                    results,
+                                );
+                                return &self.state;
+                            }
+                        } else {
+                            chisel_debug!(1, "verifyexports missing field 'preset'");
+                            self.state = DriverState::Error(
+                                DriverError::MissingRequiredField(
+                                    name.clone(),
+                                    "preset".to_string(),
+                                ),
+                                results,
+                            );
+                            return &self.state;
+                        }
+                    }
+                    "verifyimports" => {
+                        if let Some(preset) = module.options().get("preset") {
+                            let verifyimports = VerifyImports::with_preset(preset.as_str());
+                            if let Ok(verifyimports) = verifyimports {
+                                // TODO: try other translate method as well as well
+                                let module_result = verifyimports.validate(&wasm);
+                                ModuleResult::Validator(name.clone(), module_result)
+                            } else {
+                                chisel_debug!(1, "verifyimports given invalid preset");
+                                self.state = DriverState::Error(
+                                    DriverError::InvalidField(name.clone(), "preset".to_string()),
+                                    results,
+                                );
+                                return &self.state;
+                            }
+                        } else {
+                            chisel_debug!(1, "verifyimports missing field 'preset'");
+                            self.state = DriverState::Error(
+                                DriverError::MissingRequiredField(
+                                    name.clone(),
+                                    "preset".to_string(),
+                                ),
+                                results,
+                            );
+                            return &self.state;
+                        }
+                    }
+                    other => {
+                        self.state = DriverState::Error(
+                            DriverError::ModuleNotFound(name.clone(), other.to_string()),
+                            results,
+                        );
+                        return &self.state;
+                    }
                 };
 
                 // If the module was a translator or creator, we set the output in the result.
