@@ -34,6 +34,10 @@ impl<'a> ChiselModule<'a> for CheckStartFunc {
 }
 
 impl ModuleConfig for CheckStartFunc {
+    fn with_defaults() -> Result<Self, ModuleError> {
+        Err(ModuleError::NotSupported)
+    }
+
     fn with_config(config: &HashMap<String, String>) -> Result<Self, ModuleError> {
         let require_start = if let Some(value) = config.get("require_start") {
             value == "true"

@@ -81,7 +81,12 @@ pub trait ModulePreset {
         Self: std::marker::Sized;
 }
 
+// TODO: move this to be part of ChiselModule
 pub trait ModuleConfig {
+    fn with_defaults() -> Result<Self, ModuleError>
+    where
+        Self: std::marker::Sized;
+
     fn with_config(config: &HashMap<String, String>) -> Result<Self, ModuleError>
     where
         Self: std::marker::Sized;
