@@ -82,7 +82,7 @@ fn err_exit(msg: &str) -> ! {
 }
 
 /// Helper that tries both translation methods in the case that a module cannot implement one of them.
-fn translate_module<T>(module: &mut Module, translator: &T) -> Result<bool, &'static str>
+fn translate_module<T>(module: &mut WasmModule, translator: &T) -> Result<bool, &'static str>
 where
     T: ModuleTranslator,
 {
@@ -101,7 +101,7 @@ where
     }
 }
 
-fn execute_module(context: &ModuleContext, module: &mut Module) -> bool {
+fn execute_module(context: &ModuleContext, module: &mut WasmModule) -> bool {
     let (conf_name, conf_preset) = context.fields();
     let preset = conf_preset.clone();
 
@@ -219,7 +219,7 @@ fn execute_module(context: &ModuleContext, module: &mut Module) -> bool {
 
 fn chisel_execute(context: &ChiselContext) -> Result<bool, &'static str> {
     if let Ok(buffer) = read(context.file()) {
-        if let Ok(module) = Module::from_bytes(&buffer) {
+        if let Ok(module) = WasmModule::from_bytes(&buffer) {
             // If we do not parse the NamesSection here, parity-wasm will drop it at serialisation
             // It is useful to have this for a number of optimisation passes, including binaryenopt and snip
             // TODO: better error handling

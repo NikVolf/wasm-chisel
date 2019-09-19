@@ -5,7 +5,7 @@ extern crate rustc_hex;
 #[cfg(feature = "wabt")]
 pub extern crate wabt;
 
-pub use parity_wasm::elements::Module;
+use parity_wasm::elements::Module;
 
 use std::{error, fmt};
 
@@ -29,6 +29,9 @@ pub mod verifyexports;
 pub mod verifyimports;
 
 mod depgraph;
+
+/// Exported for users of this library.
+pub type WasmModule = Module;
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum ModuleKind {
