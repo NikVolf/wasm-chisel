@@ -27,6 +27,7 @@ pub mod trimexports;
 pub mod trimstartfunc;
 pub mod verifyexports;
 pub mod verifyimports;
+pub mod moduleserver;
 
 mod depgraph;
 
