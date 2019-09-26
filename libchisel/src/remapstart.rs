@@ -14,6 +14,12 @@ impl ModulePreset for RemapStart {
     }
 }
 
+impl RemapStart {
+    pub fn new() -> Self {
+        RemapStart {}
+    }
+}
+
 impl<'a> ChiselModule<'a> for RemapStart {
     type ObjectReference = &'a dyn ModuleTranslator;
 
